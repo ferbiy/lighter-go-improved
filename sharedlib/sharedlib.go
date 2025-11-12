@@ -623,15 +623,12 @@ func GetJobStatus(cJobId *C.char) (ret C.StrOrErr) {
 
 //export CleanupOldJobs
 func CleanupOldJobs() {
-	jobQueueMu.Lock()
-	defer jobQueueMu.Unlock()
+	// Force cleanup by resetting lastCleanup, then call the internal cleanup
+	jobCleanupMu.Lock()
+	lastCleanup = time.Time{} // zero time forces cleanup
+	jobCleanupMu.Unlock()
 
-	cutoff := time.Now().Add(-1 * time.Minute)
-	for jobId, job := range jobQueue {
-		if job.Timestamp.Before(cutoff) {
-			delete(jobQueue, jobId)
-		}
-	}
+	cleanupOldJobsIfNeeded()
 }
 
 //export SignCreateGroupedOrders
