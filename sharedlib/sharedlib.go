@@ -45,6 +45,13 @@ typedef struct {
 */
 import "C"
 
+const (
+	// MAX_JOB_QUEUE_SIZE limits the number of jobs that can be stored in the queue
+	// to prevent unbounded memory growth. When this limit is reached, oldest completed
+	// jobs are evicted to make room for new ones.
+	MAX_JOB_QUEUE_SIZE = 5000
+)
+
 var (
 	txClientMu      sync.Mutex
 	defaultTxClient *client.TxClient
@@ -63,6 +70,7 @@ type JobResult struct {
 	Result    string    `json:"result,omitempty"`
 	Error     string    `json:"error,omitempty"`
 	Timestamp time.Time `json:"-"`
+	JobId     string    `json:"-"` // Store jobId for eviction sorting
 }
 
 func init() {
@@ -410,10 +418,56 @@ func SignCreateOrder(cMarketIndex C.int, cClientOrderIndex C.longlong, cBaseAmou
 	return
 }
 
+// evictOldestJobs removes the oldest jobs from the queue to make room for new ones.
+// This function must be called with jobQueueMu write lock held.
+func evictOldestJobs(numToEvict int) {
+	if numToEvict <= 0 {
+		return
+	}
+
+	// Collect all jobs with their timestamps for sorting
+	type jobEntry struct {
+		id        string
+		timestamp time.Time
+	}
+	jobs := make([]jobEntry, 0, len(jobQueue))
+	for id, job := range jobQueue {
+		jobs = append(jobs, jobEntry{id: id, timestamp: job.Timestamp})
+	}
+
+	// Sort by timestamp (oldest first)
+	for i := 0; i < len(jobs)-1; i++ {
+		for j := i + 1; j < len(jobs); j++ {
+			if jobs[i].timestamp.After(jobs[j].timestamp) {
+				jobs[i], jobs[j] = jobs[j], jobs[i]
+			}
+		}
+	}
+
+	// Delete the oldest entries
+	toDelete := numToEvict
+	if toDelete > len(jobs) {
+		toDelete = len(jobs)
+	}
+	for i := 0; i < toDelete; i++ {
+		delete(jobQueue, jobs[i].id)
+	}
+}
+
 // Helper function to store job result
 func storeJobResult(jobId string, result string, err error) {
 	jobQueueMu.Lock()
 	defer jobQueueMu.Unlock()
+
+	// Check if we need to evict jobs to stay within capacity
+	if len(jobQueue) >= MAX_JOB_QUEUE_SIZE {
+		// Evict 10% of the queue to avoid frequent evictions
+		numToEvict := MAX_JOB_QUEUE_SIZE / 10
+		if numToEvict < 1 {
+			numToEvict = 1
+		}
+		evictOldestJobs(numToEvict)
+	}
 
 	errorStr := ""
 	if err != nil {
@@ -425,6 +479,7 @@ func storeJobResult(jobId string, result string, err error) {
 		Result:    result,
 		Error:     errorStr,
 		Timestamp: time.Now(),
+		JobId:     jobId,
 	}
 
 	// Trigger cleanup if needed (every 1 minute)
