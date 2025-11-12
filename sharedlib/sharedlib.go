@@ -512,6 +512,22 @@ func cleanupOldJobsIfNeeded() {
 func SignCreateOrderAsync(cMarketIndex C.int, cClientOrderIndex C.longlong, cBaseAmount C.longlong, cPrice C.int, cIsAsk C.int, cOrderType C.int, cTimeInForce C.int, cReduceOnly C.int, cTriggerPrice C.int, cOrderExpiry C.longlong, cNonce C.longlong, cApiKeyIndex C.int, cAccountIndex C.longlong, cJobId *C.char) {
 	jobId := C.GoString(cJobId)
 
+	// Convert all C types to Go types before launching goroutine
+	// to avoid use-after-free when function returns
+	apiKeyIndex := cApiKeyIndex
+	accountIndex := cAccountIndex
+	marketIndex := uint8(cMarketIndex)
+	clientOrderIndex := int64(cClientOrderIndex)
+	baseAmount := int64(cBaseAmount)
+	price := uint32(cPrice)
+	isAsk := uint8(cIsAsk)
+	orderType := uint8(cOrderType)
+	timeInForce := uint8(cTimeInForce)
+	reduceOnly := uint8(cReduceOnly)
+	triggerPrice := uint32(cTriggerPrice)
+	orderExpiry := int64(cOrderExpiry)
+	nonce := cNonce
+
 	// Launch goroutine to execute signing asynchronously
 	go func() {
 		var txInfoStr string
@@ -530,23 +546,11 @@ func SignCreateOrderAsync(cMarketIndex C.int, cClientOrderIndex C.longlong, cBas
 		}()
 
 		// Get client
-		txClient, clientErr := getTxClient(cApiKeyIndex, cAccountIndex)
+		txClient, clientErr := getTxClient(apiKeyIndex, accountIndex)
 		if clientErr != nil {
 			err = clientErr
 			return
 		}
-
-		// Convert parameters
-		marketIndex := uint8(cMarketIndex)
-		clientOrderIndex := int64(cClientOrderIndex)
-		baseAmount := int64(cBaseAmount)
-		price := uint32(cPrice)
-		isAsk := uint8(cIsAsk)
-		orderType := uint8(cOrderType)
-		timeInForce := uint8(cTimeInForce)
-		reduceOnly := uint8(cReduceOnly)
-		triggerPrice := uint32(cTriggerPrice)
-		orderExpiry := int64(cOrderExpiry)
 
 		if orderExpiry == -1 {
 			orderExpiry = time.Now().Add(time.Hour * 24 * 28).UnixMilli()
@@ -567,7 +571,7 @@ func SignCreateOrderAsync(cMarketIndex C.int, cClientOrderIndex C.longlong, cBas
 		}
 
 		// Execute signing (this is the blocking operation)
-		tx, txErr := txClient.GetCreateOrderTransaction(txInfo, getOps(cNonce))
+		tx, txErr := txClient.GetCreateOrderTransaction(txInfo, getOps(nonce))
 		if txErr != nil {
 			err = txErr
 			return
