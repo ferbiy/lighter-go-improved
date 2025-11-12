@@ -45,11 +45,38 @@ typedef struct {
 */
 import "C"
 
+const (
+	// MAX_JOB_QUEUE_SIZE limits the number of jobs that can be stored in the queue
+	// to prevent unbounded memory growth. When this limit is reached, oldest completed
+	// jobs are evicted to make room for new ones.
+	MAX_JOB_QUEUE_SIZE = 5000
+)
+
 var (
 	txClientMu      sync.Mutex
 	defaultTxClient *client.TxClient
 	allTxClients    map[int64]map[uint8]*client.TxClient
+
+	// Async job queue infrastructure
+	jobQueue     map[string]*JobResult
+	jobQueueMu   sync.RWMutex
+	jobCleanupMu sync.Mutex
+	lastCleanup  time.Time
 )
+
+// JobResult stores the result of an async operation
+type JobResult struct {
+	Completed bool      `json:"completed"`
+	Result    string    `json:"result,omitempty"`
+	Error     string    `json:"error,omitempty"`
+	Timestamp time.Time `json:"-"`
+	JobId     string    `json:"-"` // Store jobId for eviction sorting
+}
+
+func init() {
+	jobQueue = make(map[string]*JobResult)
+	lastCleanup = time.Now()
+}
 
 func wrapErr(err error) (ret *C.char) {
 	return C.CString(fmt.Sprintf("%v", err))
@@ -389,6 +416,219 @@ func SignCreateOrder(cMarketIndex C.int, cClientOrderIndex C.longlong, cBaseAmou
 
 	txInfoStr = string(txInfoBytes)
 	return
+}
+
+// evictOldestJobs removes the oldest jobs from the queue to make room for new ones.
+// This function must be called with jobQueueMu write lock held.
+func evictOldestJobs(numToEvict int) {
+	if numToEvict <= 0 {
+		return
+	}
+
+	// Collect all jobs with their timestamps for sorting
+	type jobEntry struct {
+		id        string
+		timestamp time.Time
+	}
+	jobs := make([]jobEntry, 0, len(jobQueue))
+	for id, job := range jobQueue {
+		jobs = append(jobs, jobEntry{id: id, timestamp: job.Timestamp})
+	}
+
+	// Sort by timestamp (oldest first)
+	for i := 0; i < len(jobs)-1; i++ {
+		for j := i + 1; j < len(jobs); j++ {
+			if jobs[i].timestamp.After(jobs[j].timestamp) {
+				jobs[i], jobs[j] = jobs[j], jobs[i]
+			}
+		}
+	}
+
+	// Delete the oldest entries
+	toDelete := numToEvict
+	if toDelete > len(jobs) {
+		toDelete = len(jobs)
+	}
+	for i := 0; i < toDelete; i++ {
+		delete(jobQueue, jobs[i].id)
+	}
+}
+
+// Helper function to store job result
+func storeJobResult(jobId string, result string, err error) {
+	jobQueueMu.Lock()
+	defer jobQueueMu.Unlock()
+
+	// Check if we need to evict jobs to stay within capacity
+	if len(jobQueue) >= MAX_JOB_QUEUE_SIZE {
+		// Evict 10% of the queue to avoid frequent evictions
+		numToEvict := MAX_JOB_QUEUE_SIZE / 10
+		if numToEvict < 1 {
+			numToEvict = 1
+		}
+		evictOldestJobs(numToEvict)
+	}
+
+	errorStr := ""
+	if err != nil {
+		errorStr = fmt.Sprintf("%v", err)
+	}
+
+	jobQueue[jobId] = &JobResult{
+		Completed: true,
+		Result:    result,
+		Error:     errorStr,
+		Timestamp: time.Now(),
+		JobId:     jobId,
+	}
+
+	// Trigger cleanup if needed (every 1 minute)
+	go cleanupOldJobsIfNeeded()
+}
+
+// Cleanup jobs older than 1 minute to prevent memory leaks
+func cleanupOldJobsIfNeeded() {
+	jobCleanupMu.Lock()
+	defer jobCleanupMu.Unlock()
+
+	if time.Since(lastCleanup) < 1*time.Minute {
+		return
+	}
+
+	jobQueueMu.Lock()
+	defer jobQueueMu.Unlock()
+
+	cutoff := time.Now().Add(-1 * time.Minute)
+	for jobId, job := range jobQueue {
+		if job.Timestamp.Before(cutoff) {
+			delete(jobQueue, jobId)
+		}
+	}
+
+	lastCleanup = time.Now()
+}
+
+//export SignCreateOrderAsync
+func SignCreateOrderAsync(cMarketIndex C.int, cClientOrderIndex C.longlong, cBaseAmount C.longlong, cPrice C.int, cIsAsk C.int, cOrderType C.int, cTimeInForce C.int, cReduceOnly C.int, cTriggerPrice C.int, cOrderExpiry C.longlong, cNonce C.longlong, cApiKeyIndex C.int, cAccountIndex C.longlong, cJobId *C.char) {
+	jobId := C.GoString(cJobId)
+
+	// Convert all C types to Go types before launching goroutine
+	// to avoid use-after-free when function returns
+	apiKeyIndex := cApiKeyIndex
+	accountIndex := cAccountIndex
+	marketIndex := uint8(cMarketIndex)
+	clientOrderIndex := int64(cClientOrderIndex)
+	baseAmount := int64(cBaseAmount)
+	price := uint32(cPrice)
+	isAsk := uint8(cIsAsk)
+	orderType := uint8(cOrderType)
+	timeInForce := uint8(cTimeInForce)
+	reduceOnly := uint8(cReduceOnly)
+	triggerPrice := uint32(cTriggerPrice)
+	orderExpiry := int64(cOrderExpiry)
+	nonce := cNonce
+
+	// Launch goroutine to execute signing asynchronously
+	go func() {
+		var txInfoStr string
+		var err error
+
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("%v", r)
+			}
+			// Store result regardless of success/failure
+			if err != nil {
+				storeJobResult(jobId, "", err)
+			} else {
+				storeJobResult(jobId, txInfoStr, nil)
+			}
+		}()
+
+		// Get client
+		txClient, clientErr := getTxClient(apiKeyIndex, accountIndex)
+		if clientErr != nil {
+			err = clientErr
+			return
+		}
+
+		if orderExpiry == -1 {
+			orderExpiry = time.Now().Add(time.Hour * 24 * 28).UnixMilli()
+		}
+
+		// Create transaction
+		txInfo := &types.CreateOrderTxReq{
+			MarketIndex:      marketIndex,
+			ClientOrderIndex: clientOrderIndex,
+			BaseAmount:       baseAmount,
+			Price:            price,
+			IsAsk:            isAsk,
+			Type:             orderType,
+			TimeInForce:      timeInForce,
+			ReduceOnly:       reduceOnly,
+			TriggerPrice:     triggerPrice,
+			OrderExpiry:      orderExpiry,
+		}
+
+		// Execute signing (this is the blocking operation)
+		tx, txErr := txClient.GetCreateOrderTransaction(txInfo, getOps(nonce))
+		if txErr != nil {
+			err = txErr
+			return
+		}
+
+		// Marshal to JSON
+		txInfoBytes, marshalErr := json.Marshal(tx)
+		if marshalErr != nil {
+			err = marshalErr
+			return
+		}
+
+		txInfoStr = string(txInfoBytes)
+	}()
+
+	// Return immediately (no return value)
+}
+
+//export GetJobStatus
+func GetJobStatus(cJobId *C.char) (ret C.StrOrErr) {
+	jobId := C.GoString(cJobId)
+
+	jobQueueMu.RLock()
+	defer jobQueueMu.RUnlock()
+
+	job, exists := jobQueue[jobId]
+	if !exists {
+		// Job not found - return pending status
+		ret = C.StrOrErr{
+			str: C.CString(`{"completed":false}`),
+		}
+		return
+	}
+
+	// Marshal job status to JSON
+	statusBytes, err := json.Marshal(job)
+	if err != nil {
+		ret = C.StrOrErr{
+			err: wrapErr(err),
+		}
+		return
+	}
+
+	ret = C.StrOrErr{
+		str: C.CString(string(statusBytes)),
+	}
+	return
+}
+
+//export CleanupOldJobs
+func CleanupOldJobs() {
+	// Force cleanup by resetting lastCleanup, then call the internal cleanup
+	jobCleanupMu.Lock()
+	lastCleanup = time.Time{} // zero time forces cleanup
+	jobCleanupMu.Unlock()
+
+	cleanupOldJobsIfNeeded()
 }
 
 //export SignCreateGroupedOrders
