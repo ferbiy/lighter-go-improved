@@ -5,14 +5,14 @@ import (
 	p2 "github.com/elliottech/poseidon_crypto/hash/poseidon2_goldilocks_plonky2"
 )
 
-var _ TxInfo = (*L2UnstakeAssetsTxInfo)(nil)
+var _ (TxInfo) = (*L2UpdateAccountAssetConfigTxInfo)(nil)
 
-type L2UnstakeAssetsTxInfo struct {
+type L2UpdateAccountAssetConfigTxInfo struct {
 	AccountIndex int64
 	ApiKeyIndex  uint8
 
-	StakingPoolIndex int64
-	ShareAmount      int64
+	AssetIndex      int16
+	AssetMarginMode uint8
 
 	ExpiredAt  int64
 	Nonce      int64
@@ -22,19 +22,19 @@ type L2UnstakeAssetsTxInfo struct {
 	L2TxAttributes
 }
 
-func (txInfo *L2UnstakeAssetsTxInfo) GetTxType() uint8 {
-	return TxTypeL2UnstakeAssets
+func (txInfo *L2UpdateAccountAssetConfigTxInfo) GetTxType() uint8 {
+	return TxTypeL2UpdateAccountAssetConfig
 }
 
-func (txInfo *L2UnstakeAssetsTxInfo) GetTxInfo() (string, error) {
+func (txInfo *L2UpdateAccountAssetConfigTxInfo) GetTxInfo() (string, error) {
 	return getTxInfo(txInfo)
 }
 
-func (txInfo *L2UnstakeAssetsTxInfo) GetTxHash() string {
+func (txInfo *L2UpdateAccountAssetConfigTxInfo) GetTxHash() string {
 	return txInfo.SignedHash
 }
 
-func (txInfo *L2UnstakeAssetsTxInfo) Validate() error {
+func (txInfo *L2UpdateAccountAssetConfigTxInfo) Validate() error {
 	if err := txInfo.L2TxAttributes.Validate(); err != nil {
 		return err
 	}
@@ -54,19 +54,17 @@ func (txInfo *L2UnstakeAssetsTxInfo) Validate() error {
 		return ErrApiKeyIndexTooHigh
 	}
 
-	// PublicPoolIndex
-	if txInfo.StakingPoolIndex < MinSubAccountIndex {
-		return ErrPublicPoolIndexTooLow
+	// AssetIndex
+	if txInfo.AssetIndex < MinAssetIndex {
+		return ErrAssetIndexTooLow
 	}
-	if txInfo.StakingPoolIndex > MaxAccountIndex {
-		return ErrPublicPoolIndexTooHigh
+	if txInfo.AssetIndex > MaxAssetIndex {
+		return ErrAssetIndexTooHigh
 	}
 
-	if txInfo.ShareAmount < MinStakingSharesToMintOrBurn {
-		return ErrPoolUnstakeAssetsAmountTooLow
-	}
-	if txInfo.ShareAmount > MaxStakingSharesToMintOrBurn {
-		return ErrPoolUnstakeAssetsAmountTooHigh
+	// AssetMarginMode
+	if txInfo.AssetMarginMode != AccountAssetMarginMode_MarginDisabled && txInfo.AssetMarginMode != AccountAssetMarginMode_MarginEnabled {
+		return ErrInvalidMarginMode
 	}
 
 	if txInfo.Nonce < MinNonce {
@@ -79,18 +77,19 @@ func (txInfo *L2UnstakeAssetsTxInfo) Validate() error {
 
 	return nil
 }
-func (txInfo *L2UnstakeAssetsTxInfo) Hash(lighterChainId uint32) (msgHash []byte, err error) {
+
+func (txInfo *L2UpdateAccountAssetConfigTxInfo) Hash(lighterChainId uint32) (msgHash []byte, err error) {
 	elems := make([]g.GoldilocksField, 0, 8)
 
 	elems = append(elems, g.GoldilocksField(lighterChainId))
-	elems = append(elems, g.GoldilocksField(TxTypeL2UnstakeAssets))
+	elems = append(elems, g.GoldilocksField(TxTypeL2UpdateAccountAssetConfig))
 	elems = append(elems, g.GoldilocksField(txInfo.Nonce))
 	elems = append(elems, g.GoldilocksField(txInfo.ExpiredAt))
 
 	elems = append(elems, g.GoldilocksField(txInfo.AccountIndex))
 	elems = append(elems, g.GoldilocksField(txInfo.ApiKeyIndex))
-	elems = append(elems, g.GoldilocksField(txInfo.StakingPoolIndex))
-	elems = append(elems, g.GoldilocksField(txInfo.ShareAmount))
+	elems = append(elems, g.GoldilocksField(txInfo.AssetIndex))
+	elems = append(elems, g.GoldilocksField(txInfo.AssetMarginMode))
 
 	txHash := p2.HashToQuinticExtension(elems)
 	return txInfo.L2TxAttributes.AggregateTxHash(txHash)

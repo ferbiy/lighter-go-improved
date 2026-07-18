@@ -34,6 +34,11 @@ func (c *TxClient) GetChangePubKeyTransaction(tx *types.ChangePubKeyReq, ops *ty
 		return nil, fmt.Errorf("failed to validate signature. error: %v", err)
 	}
 
+	// Signing a ChangePubKey is a strong signal that this account's
+	// server-side pubkey is about to change. Drop cached entries so a
+	// subsequent Check refetches from the server.
+	c.apiClient.InvalidateApiKeys(c.accountIndex)
+
 	return txInfo, nil
 }
 
@@ -226,6 +231,50 @@ func (c *TxClient) GetUnstakeAssetsTransaction(tx *types.UnstakeAssetsTxReq, ops
 		return nil, err
 	}
 	txInfo, err := types.ConstructUnstakeAssetsTx(c.keyManager, c.chainId, tx, ops)
+	if err != nil {
+		return nil, err
+	}
+	return txInfo, nil
+}
+
+func (c *TxClient) GetApproveIntegratorTx(tx *types.ApproveIntegratorTxReq, ops *types.TransactOpts) (*txtypes.L2ApproveIntegratorTxInfo, error) {
+	ops, err := c.FullFillDefaultOps(ops)
+	if err != nil {
+		return nil, err
+	}
+	txInfo, err := types.ConstructApproveIntegratorTx(c.keyManager, c.chainId, tx, ops)
+	if err != nil {
+		return nil, err
+	}
+
+	pk := c.keyManager.PubKeyBytes()
+	msgHash, _ := txInfo.Hash(c.chainId)
+
+	if err := schnorr.Validate(pk[:], msgHash, txInfo.Sig); err != nil {
+		return nil, fmt.Errorf("failed to validate signature. error: %v", err)
+	}
+
+	return txInfo, nil
+}
+
+func (c *TxClient) GetUpdateAccountConfigTransaction(tx *types.UpdateAccountConfigTxReq, ops *types.TransactOpts) (*txtypes.L2UpdateAccountConfigTxInfo, error) {
+	ops, err := c.FullFillDefaultOps(ops)
+	if err != nil {
+		return nil, err
+	}
+	txInfo, err := types.ConstructUpdateAccountConfigTx(c.keyManager, c.chainId, tx, ops)
+	if err != nil {
+		return nil, err
+	}
+	return txInfo, nil
+}
+
+func (c *TxClient) GetUpdateAccountAssetConfigTransaction(tx *types.UpdateAccountAssetConfigTxReq, ops *types.TransactOpts) (*txtypes.L2UpdateAccountAssetConfigTxInfo, error) {
+	ops, err := c.FullFillDefaultOps(ops)
+	if err != nil {
+		return nil, err
+	}
+	txInfo, err := types.ConstructUpdateAccountAssetConfigTx(c.keyManager, c.chainId, tx, ops)
 	if err != nil {
 		return nil, err
 	}

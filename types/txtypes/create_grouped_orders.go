@@ -2,7 +2,7 @@ package txtypes
 
 import (
 	g "github.com/elliottech/poseidon_crypto/field/goldilocks"
-	p2 "github.com/elliottech/poseidon_crypto/hash/poseidon2_goldilocks"
+	p2 "github.com/elliottech/poseidon_crypto/hash/poseidon2_goldilocks_plonky2"
 )
 
 var _ TxInfo = (*L2CreateGroupedOrdersTxInfo)(nil)
@@ -20,6 +20,8 @@ type L2CreateGroupedOrdersTxInfo struct {
 	Nonce      int64
 	Sig        []byte
 	SignedHash string `json:"-"`
+
+	L2TxAttributes
 }
 
 func (txInfo *L2CreateGroupedOrdersTxInfo) GetTxType() uint8 {
@@ -35,6 +37,10 @@ func (txInfo *L2CreateGroupedOrdersTxInfo) GetTxHash() string {
 }
 
 func (txInfo *L2CreateGroupedOrdersTxInfo) Validate() error {
+	if err := txInfo.L2TxAttributes.Validate(); err != nil {
+		return err
+	}
+
 	// AccountIndex
 	if txInfo.AccountIndex < MinAccountIndex {
 		return ErrAccountIndexTooLow
@@ -60,6 +66,7 @@ func (txInfo *L2CreateGroupedOrdersTxInfo) Validate() error {
 	}
 
 	// Perform range checks for all orders
+	uniqueClientOrderIds := make(map[int64]struct{})
 	for _, order := range txInfo.Orders {
 		// MarketIndex
 		if order.MarketIndex != txInfo.Orders[0].MarketIndex {
@@ -67,8 +74,18 @@ func (txInfo *L2CreateGroupedOrdersTxInfo) Validate() error {
 		}
 
 		// ClientOrderIndex
-		if order.ClientOrderIndex != NilClientOrderIndex {
-			return ErrClientOrderIndexNotNil
+		clientOrderIndex := order.ClientOrderIndex
+		if clientOrderIndex != NilClientOrderIndex {
+			if clientOrderIndex < MinClientOrderIndex {
+				return ErrClientOrderIndexTooLow
+			}
+			if clientOrderIndex > MaxClientOrderIndex {
+				return ErrClientOrderIndexTooHigh
+			}
+			if _, exists := uniqueClientOrderIds[clientOrderIndex]; exists {
+				return ErrClientOrderIndexDuplicate
+			}
+			uniqueClientOrderIds[clientOrderIndex] = struct{}{}
 		}
 
 		// BaseAmount
@@ -296,30 +313,29 @@ func (txInfo *L2CreateGroupedOrdersTxInfo) ValidateOTOCO() error {
 	return txInfo.ValidateSiblingOrders(txInfo.Orders[1:])
 }
 
-func (txInfo *L2CreateGroupedOrdersTxInfo) Hash(lighterChainId uint32, extra ...g.Element) (msgHash []byte, err error) {
-	elems := make([]g.Element, 0, 11)
-	elems = append(elems, g.FromUint32(lighterChainId))
-	elems = append(elems, g.FromUint32(TxTypeL2CreateGroupedOrders))
-	elems = append(elems, g.FromInt64(txInfo.Nonce))
-	elems = append(elems, g.FromInt64(txInfo.ExpiredAt))
-
-	elems = append(elems, g.FromInt64(txInfo.AccountIndex))
-	elems = append(elems, g.FromUint32(uint32(txInfo.ApiKeyIndex)))
-	elems = append(elems, g.FromUint32(uint32(txInfo.GroupingType)))
+func (txInfo *L2CreateGroupedOrdersTxInfo) Hash(lighterChainId uint32) (msgHash []byte, err error) {
+	elems := make([]g.GoldilocksField, 0, 11)
+	elems = append(elems, g.GoldilocksField(lighterChainId))
+	elems = append(elems, g.GoldilocksField(TxTypeL2CreateGroupedOrders))
+	elems = append(elems, g.GoldilocksField(txInfo.Nonce))
+	elems = append(elems, g.GoldilocksField(txInfo.ExpiredAt))
+	elems = append(elems, g.GoldilocksField(txInfo.AccountIndex))
+	elems = append(elems, g.GoldilocksField(txInfo.ApiKeyIndex))
+	elems = append(elems, g.GoldilocksField(txInfo.GroupingType))
 
 	aggregatedOrderHash := p2.EmptyHashOut()
 	for index, order := range txInfo.Orders {
-		orderHash := p2.HashNoPad([]g.Element{
-			g.FromUint32(uint32(order.MarketIndex)),
-			g.FromInt64(order.ClientOrderIndex),
-			g.FromInt64(order.BaseAmount),
-			g.FromUint32(order.Price),
-			g.FromUint32(uint32(order.IsAsk)),
-			g.FromUint32(uint32(order.Type)),
-			g.FromUint32(uint32(order.TimeInForce)),
-			g.FromUint32(uint32(order.ReduceOnly)),
-			g.FromUint32(order.TriggerPrice),
-			g.FromInt64(order.OrderExpiry),
+		orderHash := p2.HashNoPad([]g.GoldilocksField{
+			g.GoldilocksField(order.MarketIndex),
+			g.GoldilocksField(order.ClientOrderIndex),
+			g.GoldilocksField(order.BaseAmount),
+			g.GoldilocksField(order.Price),
+			g.GoldilocksField(order.IsAsk),
+			g.GoldilocksField(order.Type),
+			g.GoldilocksField(order.TimeInForce),
+			g.GoldilocksField(order.ReduceOnly),
+			g.GoldilocksField(order.TriggerPrice),
+			g.GoldilocksField(order.OrderExpiry),
 		})
 		if index == 0 {
 			aggregatedOrderHash = orderHash
@@ -329,5 +345,6 @@ func (txInfo *L2CreateGroupedOrdersTxInfo) Hash(lighterChainId uint32, extra ...
 	}
 	elems = append(elems, aggregatedOrderHash[:]...)
 
-	return p2.HashToQuinticExtension(elems).ToLittleEndianBytes(), nil
+	txHash := p2.HashToQuinticExtension(elems)
+	return txInfo.L2TxAttributes.AggregateTxHash(txHash)
 }

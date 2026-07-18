@@ -1,5 +1,11 @@
 ### Local builds
 
+build-all:
+    just build-darwin-local
+    just build-linux-amd64-docker
+    just build-linux-arm64-docker
+    just build-windows-amd64-docker
+
 build-darwin-local:
     go mod vendor
     go build -buildmode=c-shared -trimpath -o ./build/lighter-signer-darwin-arm64.dylib ./sharedlib/main.go
@@ -42,8 +48,23 @@ build-windows-amd64-docker:
       apt-get install -y gcc-mingw-w64-x86-64 && \
       CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc go build -buildmode=c-shared -trimpath -o ./build/lighter-signer-windows-amd64.dll ./sharedlib"
 
+build-darwin-amd64-local:
+    go mod vendor
+    go build -buildmode=c-shared -trimpath -o ./build/lighter-signer-darwin-amd64.dylib ./sharedlib/main.go
+
 ### WASM builds
 
 build-wasm:
     go mod vendor
     GOOS=js GOARCH=wasm go build -trimpath -o ./build/lighter-signer.wasm ./wasm/
+
+### Examples
+
+build-java:
+    mvn -B -f examples/java/pom.xml clean compile
+
+build-rust:
+    cargo build --release --manifest-path examples/rust/Cargo.toml
+
+build-cpp:
+    clang++ -std=c++20 -O3 examples/cpp/example.cpp ./build/lighter-signer-linux.so -o ./build/example-cpp
